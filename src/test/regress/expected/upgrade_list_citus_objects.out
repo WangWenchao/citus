@@ -146,6 +146,7 @@ ORDER BY 1;
  function fix_pre_citus10_partitioned_table_constraint_names()
  function fix_pre_citus10_partitioned_table_constraint_names(regclass)
  function get_all_active_transactions()
+ function get_cluster_clock()
  function get_colocated_shard_array(bigint)
  function get_colocated_table_array(regclass)
  function get_current_transaction_id()
@@ -275,5 +276,5 @@ ORDER BY 1;
  view citus_stat_statements
  view pg_dist_shard_placement
  view time_partitions
-(259 rows)
+(260 rows)
 

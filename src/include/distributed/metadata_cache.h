@@ -164,6 +164,8 @@ extern CitusTableCacheEntry * GetCitusTableCacheEntry(Oid distributedRelationId)
 extern CitusTableCacheEntry * LookupCitusTableCacheEntry(Oid relationId);
 extern DistObjectCacheEntry * LookupDistObjectCacheEntry(Oid classid, Oid objid, int32
 														 objsubid);
+extern bool GetLocalClockValue(uint64 *savedValue);
+extern void PersistLocalClockValue(int code, Datum argUnused);
 extern int32 GetLocalGroupId(void);
 extern int32 GetLocalNodeId(void);
 extern void CitusTableCacheFlushInvalidatedEntries(void);

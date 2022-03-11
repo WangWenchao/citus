@@ -45,3 +45,6 @@ CREATE FUNCTION pg_catalog.worker_repartition_cleanup(bigint)
  LANGUAGE c
  STRICT
 AS 'MODULE_PATHNAME', $function$worker_repartition_cleanup$function$
+
+ALTER TABLE pg_catalog.pg_dist_local_group DROP COLUMN logical_clock_value;
+DROP FUNCTION pg_catalog.get_cluster_clock();

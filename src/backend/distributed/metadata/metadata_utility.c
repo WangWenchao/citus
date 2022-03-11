@@ -55,9 +55,11 @@
 #include "distributed/worker_manager.h"
 #include "distributed/worker_protocol.h"
 #include "distributed/version_compat.h"
+#include "distributed/pg_dist_local_group.h"
 #include "nodes/makefuncs.h"
 #include "parser/scansup.h"
 #include "storage/lmgr.h"
+#include "storage/ipc.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -2204,4 +2206,21 @@ bool
 IsForeignTable(Oid relationId)
 {
 	return get_rel_relkind(relationId) == RELKIND_FOREIGN_TABLE;
+}
+
+
+void
+RegisterAndAdjustClockValue(void)
+{
+	static bool registeredSaveClock = false;
+
+	/* Avoid repeated initialization */
+	if (registeredSaveClock == true)
+	{
+		return;
+	}
+
+	before_shmem_exit(PersistLocalClockValue, (Datum) 0);
+	AdjustAndInitializeClusterClock();
+	registeredSaveClock = true;
 }

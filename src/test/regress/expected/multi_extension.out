@@ -1044,7 +1044,8 @@ SELECT * FROM multi_extension.print_extension_changes();
  function worker_merge_files_into_table(bigint,integer,text[],text[]) void              |
  function worker_range_partition_table(bigint,integer,text,text,oid,anyarray) void      |
  function worker_repartition_cleanup(bigint) void                                       |
-(8 rows)
+                                                                                        | function get_cluster_clock() bigint
+(9 rows)
 
 DROP TABLE multi_extension.prev_objects, multi_extension.extension_diff;
 -- show running version

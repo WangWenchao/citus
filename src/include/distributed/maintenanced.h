@@ -21,6 +21,9 @@
 /* config variable for */
 extern double DistributedDeadlockDetectionTimeoutFactor;
 
+/* set to true when becoming a maintenance daemon */
+extern bool IsMaintenanceDaemon;
+
 extern void StopMaintenanceDaemon(Oid databaseId);
 extern void TriggerNodeMetadataSync(Oid databaseId);
 extern void InitializeMaintenanceDaemon(void);

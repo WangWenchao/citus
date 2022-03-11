@@ -112,7 +112,7 @@ static volatile sig_atomic_t got_SIGHUP = false;
 static volatile sig_atomic_t got_SIGTERM = false;
 
 /* set to true when becoming a maintenance daemon */
-static bool IsMaintenanceDaemon = false;
+bool IsMaintenanceDaemon = false;
 
 static void MaintenanceDaemonSigTermHandler(SIGNAL_ARGS);
 static void MaintenanceDaemonSigHupHandler(SIGNAL_ARGS);
@@ -620,6 +620,13 @@ CitusMaintenanceDaemonMain(Datum main_arg)
 
 			/* make sure we don't wait too long */
 			timeout = Min(timeout, deadlockTimeout);
+		}
+
+		/* Periodically persist the logical clock value */
+		if (!RecoveryInProgress())
+		{
+			InvalidateMetadataSystemCache();
+			PersistLocalClockValue(0, (Datum) 0);
 		}
 
 		if (!RecoveryInProgress() && DeferShardDeleteInterval > 0 &&

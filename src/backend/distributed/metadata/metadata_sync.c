@@ -1349,7 +1349,8 @@ LocalGroupIdUpdateCommand(int32 groupId)
 {
 	StringInfo updateCommand = makeStringInfo();
 
-	appendStringInfo(updateCommand, "UPDATE pg_dist_local_group SET groupid = %d",
+	appendStringInfo(updateCommand,
+					 "UPDATE pg_dist_local_group SET groupid = %d, logical_clock_value = get_cluster_clock()",
 					 groupId);
 
 	return updateCommand->data;

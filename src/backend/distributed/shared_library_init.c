@@ -539,6 +539,7 @@ StartupCitusBackend(void)
 	InitializeBackendData();
 	RegisterConnectionCleanup();
 	AssignGlobalPID();
+	RegisterAndAdjustClockValue();
 }
 
 

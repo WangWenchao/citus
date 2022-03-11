@@ -73,6 +73,9 @@ extern void DecrementExternalClientBackendCounter(void);
 extern bool ExecuteRemoteQueryOrCommand(char *nodeName, uint32 nodePort,
 										char *queryString, StringInfo queryResultString,
 										bool reportResultError);
+extern void AdjustAndInitializeClusterClock(void);
+extern uint64 GetClusterClockValue(void);
+extern uint64 GetEpochTimeMs(void);
 
 #define INVALID_CITUS_INTERNAL_BACKEND_GPID 0
 #define GLOBAL_PID_NODE_ID_FOR_NODES_NOT_IN_METADATA 99999999

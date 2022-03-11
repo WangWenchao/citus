@@ -39,6 +39,7 @@
 #include "distributed/function_utils.h"
 #include "distributed/foreign_key_relationship.h"
 #include "distributed/listutils.h"
+#include "distributed/maintenanced.h"
 #include "distributed/metadata_utility.h"
 #include "distributed/metadata/pg_dist_object.h"
 #include "distributed/metadata_cache.h"
@@ -267,6 +268,7 @@ static void InitializeTableCacheEntry(int64 shardId);
 static bool IsCitusTableTypeInternal(char partitionMethod, char replicationModel,
 									 CitusTableType tableType);
 static bool RefreshTableCacheEntryIfInvalid(ShardIdCacheEntry *shardEntry);
+static void UpdateClockCatalog(void);
 
 
 /* exports for SQL callable functions */
@@ -4909,4 +4911,155 @@ poolinfo_valid(PG_FUNCTION_ARGS)
 					errhint("To learn more about using advanced pooling schemes "
 							"with Citus, please contact us at "
 							"https://citusdata.com/about/contact_us")));
+}
+
+
+/*
+ * GetLocalClockValue returns logical_clock_value value stored in
+ * the Citus catalog pg_dist_local_group in given "savedValue"
+ * arg.
+ *
+ * Returns true on success, i.e.: finds a record in pg_dist_local_group,
+ * and false otherwise.
+ */
+bool
+GetLocalClockValue(uint64 *savedValue)
+{
+	ScanKey scanKey = NULL;
+	int scanKeyCount = 0;
+	bool success;
+
+	InitializeCaches();
+
+	Relation pgDistLocalGroupId = table_open(DistLocalGroupIdRelationId(),
+											 AccessShareLock);
+
+	SysScanDesc scanDescriptor = systable_beginscan(pgDistLocalGroupId,
+													InvalidOid, false,
+													NULL, scanKeyCount, scanKey);
+
+	TupleDesc tupleDescriptor = RelationGetDescr(pgDistLocalGroupId);
+
+	HeapTuple heapTuple = systable_getnext(scanDescriptor);
+
+	if (HeapTupleIsValid(heapTuple))
+	{
+		Datum datumArray[Natts_pg_dist_local_group];
+		bool isNullArray[Natts_pg_dist_local_group];
+
+		heap_deform_tuple(heapTuple, tupleDescriptor, datumArray, isNullArray);
+
+		if (isNullArray[Anum_pg_dist_local_logical_clock_value - 1])
+		{
+			ereport(ERROR, (errmsg("unexpected: got null clock value "
+								   "stored in pg_dist_local_group")));
+		}
+
+		*savedValue = DatumGetInt64(
+			datumArray[Anum_pg_dist_local_logical_clock_value - 1]);
+		success = true;
+	}
+	else
+	{
+		/*
+		 * Upgrade is happening. When upgrading postgres, pg_dist_local_group is
+		 * temporarily empty before citus_finish_pg_upgrade() finishes execution.
+		 */
+		success = false;
+	}
+
+	systable_endscan(scanDescriptor);
+	table_close(pgDistLocalGroupId, AccessShareLock);
+
+	return success;
+}
+
+
+/*
+ * PersistLocalClockValue gets invoked in two places, one in Citus maintenance
+ * daemon, and when a ever a backend exits, but that still leaves a time
+ * window where the clock value used may not be current in the catalog.
+ * TBD: May be store it during Checkpoint too?
+ */
+void
+PersistLocalClockValue(int code, Datum argUnused)
+{
+	/* It's a no-op if any below are true
+	 * Dist cache(s) are not set up yet or
+	 * In the midst of creating or altering extension or
+	 * If the version checks are disabled
+	 */
+	if (IsInitProcessingMode() || creating_extension ||
+		!EnableVersionChecks || (!IsMaintenanceDaemon))
+	{
+		return;
+	}
+
+	StartTransactionCommand();
+
+	if (LockCitusExtension() && CheckCitusVersion(LOG) && CitusHasBeenLoaded())
+	{
+		UpdateClockCatalog();
+	}
+
+	CommitTransactionCommand();
+}
+
+
+/*
+ * UpdateClockCatalog persists the most recent logical clock value
+ * into the catalog pg_dist_local_group.
+ */
+static void
+UpdateClockCatalog(void)
+{
+	ScanKey scanKey = NULL;
+	int scanKeyCount = 0;
+	Datum values[Natts_pg_dist_local_group] = { 0 };
+	bool isNull[Natts_pg_dist_local_group] = { false };
+	bool replace[Natts_pg_dist_local_group] = { false };
+	static uint64 savedClockValue = 0;
+
+	uint64 clockValue = GetClusterClockValue();
+
+	if (clockValue == savedClockValue)
+	{
+		/* clock didn't move, nothing to save */
+		return;
+	}
+
+	/* clock should only move forward */
+	Assert(clockValue > savedClockValue);
+
+	Relation pgDistLocalGroupId = table_open(DistLocalGroupIdRelationId(),
+											 RowExclusiveLock);
+	TupleDesc tupleDescriptor = RelationGetDescr(pgDistLocalGroupId);
+	SysScanDesc scanDescriptor = systable_beginscan(pgDistLocalGroupId,
+													InvalidOid,
+													false,
+													NULL, scanKeyCount, scanKey);
+
+	HeapTuple heapTuple = systable_getnext(scanDescriptor);
+	if (!HeapTupleIsValid(heapTuple))
+	{
+		ereport(LOG, (errmsg("could not find valid entry in pg_dist_local")));
+		systable_endscan(scanDescriptor);
+		table_close(pgDistLocalGroupId, NoLock);
+		return;
+	}
+
+	values[Anum_pg_dist_local_logical_clock_value - 1] = Int64GetDatum(clockValue);
+	isNull[Anum_pg_dist_local_logical_clock_value - 1] = false;
+	replace[Anum_pg_dist_local_logical_clock_value - 1] = true;
+
+	heapTuple = heap_modify_tuple(heapTuple, tupleDescriptor, values, isNull, replace);
+
+	CatalogTupleUpdate(pgDistLocalGroupId, &heapTuple->t_self, heapTuple);
+
+	CitusInvalidateRelcacheByRelid(DistLocalGroupIdRelationId());
+	systable_endscan(scanDescriptor);
+	table_close(pgDistLocalGroupId, NoLock);
+
+	/* cache the saved value */
+	savedClockValue = clockValue;
 }

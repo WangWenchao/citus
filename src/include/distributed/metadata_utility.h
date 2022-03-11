@@ -294,4 +294,6 @@ extern void EnsureSequenceTypeSupported(Oid seqOid, Oid attributeTypeId, Oid
 										ownerRelationId);
 extern void AlterSequenceType(Oid seqOid, Oid typeOid);
 extern void EnsureRelationHasCompatibleSequenceTypes(Oid relationId);
+extern void RegisterAndAdjustClockValue(void);
+
 #endif   /* METADATA_UTILITY_H */

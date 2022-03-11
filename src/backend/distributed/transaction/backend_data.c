@@ -12,6 +12,8 @@
 
 #include "postgres.h"
 
+#include <sys/time.h>
+
 #include "distributed/pg_version_constants.h"
 
 #include "miscadmin.h"
@@ -75,6 +77,10 @@ typedef struct BackendManagementShmemData
 	 */
 	pg_atomic_uint32 externalClientBackendCounter;
 
+	/* Logical clock value of this cluster */
+	slock_t clockMutex;
+	uint64 clusterClockValue;
+
 	BackendData backends[FLEXIBLE_ARRAY_MEMBER];
 } BackendManagementShmemData;
 
@@ -102,6 +108,7 @@ PG_FUNCTION_INFO_V1(citus_calculate_gpid);
 PG_FUNCTION_INFO_V1(citus_backend_gpid);
 PG_FUNCTION_INFO_V1(citus_nodeid_for_gpid);
 PG_FUNCTION_INFO_V1(citus_pid_for_gpid);
+PG_FUNCTION_INFO_V1(get_cluster_clock);
 
 
 /*
@@ -552,6 +559,10 @@ BackendManagementShmemInit(void)
 
 		/* there are no active backends yet, so start with zero */
 		pg_atomic_init_u32(&backendManagementShmemData->externalClientBackendCounter, 0);
+
+		/* A zero value indicates that the clock is not adjusted yet */
+		backendManagementShmemData->clusterClockValue = 0;
+		SpinLockInit(&backendManagementShmemData->clockMutex);
 
 		/*
 		 * We need to init per backend's spinlock before any backend
@@ -1277,4 +1288,121 @@ void
 DecrementExternalClientBackendCounter(void)
 {
 	pg_atomic_sub_fetch_u32(&backendManagementShmemData->externalClientBackendCounter, 1);
+}
+
+
+/*
+ * GetEpochTimeMs returns the epoch value in milliseconds.
+ */
+uint64
+GetEpochTimeMs(void)
+{
+	struct timeval tp;
+
+	gettimeofday(&tp, NULL);
+
+	uint64 result = (uint64) (tp.tv_sec) * 1000;
+	result = result + (uint64) (tp.tv_usec) / 1000;
+	return result;
+}
+
+
+/*
+ * get_cluster_clock() is an UDF that returns a monotonically increasing logical
+ * clock. Clock guarantees to never go back in value after restarts, and makes
+ * best attempt to keep the value close to unix epoch time in milliseconds.
+ */
+Datum
+get_cluster_clock(PG_FUNCTION_ARGS)
+{
+	uint64 epochValue = GetEpochTimeMs();
+	uint64 nextClusterClockValue = 0;
+
+	SpinLockAcquire(&backendManagementShmemData->clockMutex);
+
+	/* Check if the clock is adjusted after the boot */
+	if (backendManagementShmemData->clusterClockValue == 0)
+	{
+		SpinLockRelease(&backendManagementShmemData->clockMutex);
+		ereport(ERROR, (errmsg("backend never adjusted the clock, please retry")));
+
+		/* never reaches */
+		PG_RETURN_UINT64(nextClusterClockValue);
+	}
+
+	nextClusterClockValue = backendManagementShmemData->clusterClockValue + 1;
+
+	/*
+	 * Incrementing by 1 ensures uniqueness as the clock precision can be
+	 * less than a millisecond.
+	 */
+	epochValue = epochValue + 1;
+
+	if (epochValue > nextClusterClockValue)
+	{
+		nextClusterClockValue = epochValue;
+	}
+
+	backendManagementShmemData->clusterClockValue = nextClusterClockValue;
+
+	SpinLockRelease(&backendManagementShmemData->clockMutex);
+
+	PG_RETURN_UINT64(nextClusterClockValue);
+}
+
+
+/*
+ * GetClusterClockValue returns the current logical clock value.
+ */
+uint64
+GetClusterClockValue(void)
+{
+	SpinLockAcquire(&backendManagementShmemData->clockMutex);
+	uint64 epochValue = backendManagementShmemData->clusterClockValue;
+	SpinLockRelease(&backendManagementShmemData->clockMutex);
+
+	return epochValue;
+}
+
+
+/*
+ * AdjustAndInitializeClusterClock compares the current epoch value with
+ * the persisted clock value to see if the clock drifted backwards, and
+ * adjusts the logical clock accordingly.
+ * Ideally, this routine should be called only _once_ at the time of boot.
+ */
+void
+AdjustAndInitializeClusterClock(void)
+{
+	uint64 epochPersistedValue;
+
+	if (!GetLocalClockValue(&epochPersistedValue))
+	{
+		/* couldn't get the value from catalog, might happened
+		 * during pg upgrade */
+		return;
+	}
+
+	/* Ensure clock never drifts back */
+	SpinLockAcquire(&backendManagementShmemData->clockMutex);
+
+	/* Check if the clock was already set after the boot */
+	if (backendManagementShmemData->clusterClockValue > 0)
+	{
+		/* Already initialized */
+		SpinLockRelease(&backendManagementShmemData->clockMutex);
+		return;
+	}
+
+	Assert(backendManagementShmemData->clusterClockValue == 0);
+	backendManagementShmemData->clusterClockValue = epochPersistedValue;
+
+	SpinLockRelease(&backendManagementShmemData->clockMutex);
+
+	uint64 epochValue = GetEpochTimeMs();
+	if (epochPersistedValue > epochValue)
+	{
+		ereport(LOG, (errmsg("Drift in the epoch clock, adjusted "
+							 "to persisted old value:(%ld)", epochPersistedValue)));
+	}
 }

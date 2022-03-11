@@ -96,6 +96,8 @@ test: object_propagation_debug
 test: undistribute_table
 test: run_command_on_all_nodes
 
+# Test to check cluster clock
+test: clock
 
 # ---------
 # test that no tests leaked intermediate results. This should always be last
