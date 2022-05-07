@@ -39,7 +39,6 @@ static List * FilterNameListForDistributedViews(List *viewNamesList, bool missin
 static void AppendQualifiedViewNameToCreateViewCommand(StringInfo buf, Oid viewOid);
 static void AppendAliasesToCreateViewCommand(StringInfo createViewCommand, Oid viewOid);
 static void AppendOptionsToCreateViewCommand(StringInfo createViewCommand, Oid viewOid);
-static StringInfo CreateAlterViewOwnerCommand(Oid viewOid);
 
 /*
  * PreprocessViewStmt is called during the planning phase for CREATE OR REPLACE VIEW
@@ -145,12 +144,14 @@ PostprocessViewStmt(Node *node, const char *queryString)
 
 	EnsureDependenciesExistOnAllNodes(&viewAddress);
 
-	List *commands = list_make1(DISABLE_DDL_PROPAGATION);
-	commands = list_concat(commands,
-						   CreateViewDDLCommandsIdempotent(viewAddress.objectId));
-	commands = lappend(commands, ENABLE_DDL_PROPAGATION);
+	char *command = CreateViewDDLCommand(viewAddress.objectId);
 
-	return NodeDDLTaskList(NON_COORDINATOR_NODES, commands);
+	DDLJob *ddlJob = palloc0(sizeof(DDLJob));
+	ddlJob->targetObjectAddress = viewAddress;
+	ddlJob->metadataSyncCommand = command;
+	ddlJob->taskList = NIL;
+
+	return list_make1(ddlJob);
 }
 
 
@@ -264,11 +265,11 @@ FilterNameListForDistributedViews(List *viewNamesList, bool missing_ok)
 
 
 /*
- * CreateViewDDLCommandsIdempotent returns a list of DDL statements (const char *) to be
- * executed on a node to recreate the view addressed by the viewAddress.
+ * CreateViewDDLCommand returns the DDL command to create the view addressed by
+ * the viewAddress.
  */
-List *
-CreateViewDDLCommandsIdempotent(Oid viewOid)
+char *
+CreateViewDDLCommand(Oid viewOid)
 {
 	StringInfo createViewCommand = makeStringInfo();
 
@@ -279,10 +280,7 @@ CreateViewDDLCommandsIdempotent(Oid viewOid)
 	AppendOptionsToCreateViewCommand(createViewCommand, viewOid);
 	AppendViewDefinitionToCreateViewCommand(createViewCommand, viewOid);
 
-	StringInfo alterOwnerCommand = CreateAlterViewOwnerCommand(viewOid);
-
-	return list_make2(createViewCommand->data,
-					  alterOwnerCommand->data);
+	return createViewCommand->data;
 }
 
 
@@ -404,11 +402,11 @@ AppendViewDefinitionToCreateViewCommand(StringInfo buf, Oid viewOid)
 
 
 /*
- * CreateAlterViewOwnerCommand creates the command to alter view owner command for the
+ * AlterViewOwnerCommand returns the command to alter view owner command for the
  * given view oid.
  */
-static StringInfo
-CreateAlterViewOwnerCommand(Oid viewOid)
+char *
+AlterViewOwnerCommand(Oid viewOid)
 {
 	/* Add alter owner commmand */
 	StringInfo alterOwnerCommand = makeStringInfo();
@@ -424,5 +422,5 @@ CreateAlterViewOwnerCommand(Oid viewOid)
 					 "ALTER VIEW %s OWNER TO %s", qualifiedViewName,
 					 quote_identifier(viewOwnerName));
 
-	return alterOwnerCommand;
+	return alterOwnerCommand->data;
 }

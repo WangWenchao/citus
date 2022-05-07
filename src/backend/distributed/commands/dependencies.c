@@ -351,7 +351,10 @@ GetDependencyCreateDDLCommands(const ObjectAddress *dependency)
 
 			if (relKind == RELKIND_VIEW)
 			{
-				return CreateViewDDLCommandsIdempotent(dependency->objectId);
+				char *createViewCommand = CreateViewDDLCommand(dependency->objectId);
+				char *alterViewOwnerCommand = AlterViewOwnerCommand(dependency->objectId);
+
+				return list_make2(createViewCommand, alterViewOwnerCommand);
 			}
 
 			/* if this relation is not supported, break to the error at the end */
