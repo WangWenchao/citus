@@ -56,7 +56,12 @@ extern bool InDelegatedProcedureCall;
  */
 typedef struct DDLJob
 {
-	ObjectAddress targetObjectAddress;      /* target distributed object address */
+	/*
+	 * Target distributed object address. If DDLJob targets multiple distributed objects
+	 * which can happen in case of dropping multiple distributed objects of the same type,
+	 * it will hold the address for one of them.
+	 */
+	ObjectAddress targetObjectAddress;
 
 	/*
 	 * Whether to commit and start a new transaction before sending commands

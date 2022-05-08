@@ -36,6 +36,7 @@
 #include "utils/syscache.h"
 
 static List * FilterNameListForDistributedViews(List *viewNamesList, bool missing_ok);
+static ObjectAddress GetAddressOfFirstView(List *viewNamesList);
 static void AppendQualifiedViewNameToCreateViewCommand(StringInfo buf, Oid viewOid);
 static void AppendAliasesToCreateViewCommand(StringInfo createViewCommand, Oid viewOid);
 static void AppendOptionsToCreateViewCommand(StringInfo createViewCommand, Oid viewOid);
@@ -218,11 +219,38 @@ PreprocessDropViewStmt(Node *node, const char *queryString, ProcessUtilityContex
 	stmtCopy->objects = distributedViews;
 	const char *dropStmtSql = DeparseTreeNode((Node *) stmtCopy);
 
-	List *commands = list_make3(DISABLE_DDL_PROPAGATION,
-								(void *) dropStmtSql,
-								ENABLE_DDL_PROPAGATION);
+	DDLJob *ddlJob = palloc0(sizeof(DDLJob));
+	ddlJob->targetObjectAddress = GetAddressOfFirstView(distributedViews);
+	ddlJob->metadataSyncCommand = dropStmtSql;
+	ddlJob->taskList = NIL;
 
-	return NodeDDLTaskList(NON_COORDINATOR_NODES, commands);
+	return list_make1(ddlJob);
+}
+
+
+/*
+ * GetAddressOfFirstView returns the address of the first view from the given
+ * view name list.
+ */
+static ObjectAddress
+GetAddressOfFirstView(List *viewNamesList)
+{
+	if (viewNamesList == NULL || list_length(viewNamesList) == 0)
+	{
+		return InvalidObjectAddress;
+	}
+
+	Value *qualifiedViewName = linitial(viewNamesList);
+	char *schemaName = strVal(qualifiedViewName);
+	char *viewName = strVal(qualifiedViewName);
+
+	Oid schemaId = get_namespace_oid(schemaName, false);
+	Oid viewOid = get_relname_relid(viewName, schemaId);
+
+	ObjectAddress firstViewAddress = { 0 };
+	ObjectAddressSet(firstViewAddress, RelationRelationId, viewOid);
+
+	return firstViewAddress;
 }
 
 
