@@ -27,24 +27,26 @@ QualifyDropViewStmt(Node *node)
 	DropStmt *stmt = castNode(DropStmt, node);
 	List *qualifiedViewNames = NIL;
 
-	List *viewName = NULL;
-	foreach_ptr(viewName, stmt->objects)
+	List *possiblyQualifiedViewName = NULL;
+	foreach_ptr(possiblyQualifiedViewName, stmt->objects)
 	{
-		/*
-		 * If the view name is not qualified, qualify it. Else use it directly
-		 */
-		if (list_length(viewName) == 1)
+		char *viewName = NULL;
+		char *schemaName = NULL;
+		DeconstructQualifiedName(possiblyQualifiedViewName, &schemaName, &viewName);
+
+		if (schemaName == NULL)
 		{
 			char *objname = NULL;
-			Oid schemaOid = QualifiedNameGetCreationNamespace(viewName, &objname);
-			char *schemaName = get_namespace_name(schemaOid);
+			Oid schemaOid = QualifiedNameGetCreationNamespace(possiblyQualifiedViewName,
+															  &objname);
+			schemaName = get_namespace_name(schemaOid);
 			List *qualifiedViewName = list_make2(makeString(schemaName),
-												 linitial(viewName));
+												 makeString(viewName));
 			qualifiedViewNames = lappend(qualifiedViewNames, qualifiedViewName);
 		}
 		else
 		{
-			qualifiedViewNames = lappend(qualifiedViewNames, viewName);
+			qualifiedViewNames = lappend(qualifiedViewNames, possiblyQualifiedViewName);
 		}
 	}
 

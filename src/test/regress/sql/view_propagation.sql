@@ -131,6 +131,25 @@ CREATE OR REPLACE VIEW prop_view_10 AS SELECT * FROM prop_view_9;
 SELECT * FROM (SELECT pg_identify_object_as_address(classid, objid, objsubid) as obj_identifier from pg_catalog.pg_dist_object) as obj_identifiers where obj_identifier::text like '%prop_view_9%';
 SELECT * FROM (SELECT pg_identify_object_as_address(classid, objid, objsubid) as obj_identifier from pg_catalog.pg_dist_object) as obj_identifiers where obj_identifier::text like '%prop_view_10%';
 
+-- Check views owned by non-superuser
+SET client_min_messages TO ERROR;
+CREATE USER view_creation_user;
+SELECT run_command_on_workers($$CREATE USER view_creation_user;$$);
+GRANT ALL PRIVILEGES ON SCHEMA view_prop_schema to view_creation_user;
+
+SET ROLE view_creation_user;
+
+CREATE TABLE user_owned_table_for_view(id int);
+SELECT create_distributed_table('user_owned_table_for_view','id');
+CREATE VIEW view_owned_by_user AS SELECT * FROM user_owned_table_for_view;
+SELECT * FROM (SELECT pg_identify_object_as_address(classid, objid, objsubid) as obj_identifier from pg_catalog.pg_dist_object) as obj_identifiers where obj_identifier::text like '%view_owned_by_user%';
+DROP VIEW view_owned_by_user;
+SELECT * FROM (SELECT pg_identify_object_as_address(classid, objid, objsubid) as obj_identifier from pg_catalog.pg_dist_object) as obj_identifiers where obj_identifier::text like '%view_owned_by_user%';
+DROP TABLE user_owned_table_for_view;
+
+RESET ROLE;
+RESET client_min_messages;
+
 -- Create view with different options
 
 CREATE TABLE view_table_6(id int, val_1 text);
@@ -158,6 +177,34 @@ SELECT * FROM (SELECT pg_identify_object_as_address(classid, objid, objsubid) as
 CREATE TEMPORARY SEQUENCE temp_sequence_to_drop;
 CREATE VIEW temp_seq_view_prop AS SELECT temp_sequence_to_drop.is_called FROM temp_sequence_to_drop;
 
+-- Check circular dependencies are detected
+CREATE VIEW circular_view_1 AS SELECT * FROM view_table_6;
+CREATE VIEW circular_view_2 AS SELECT * FROM view_table_6;
+CREATE OR REPLACE VIEW circular_view_1 AS SELECT view_table_6.* FROM view_table_6 JOIN circular_view_2 USING (id);
+CREATE OR REPLACE VIEW circular_view_2 AS SELECT view_table_6.* FROM view_table_6 JOIN circular_view_1 USING (id);
+
+-- Recursive views with distributed tables included
+CREATE TABLE employees (employee_id int, manager_id int, full_name text);
+SELECT create_distributed_table('employees', 'employee_id');
+
+CREATE OR REPLACE RECURSIVE VIEW reporting_line (employee_id, subordinates) AS
+SELECT
+	employee_id,
+	full_name AS subordinates
+FROM
+	employees
+WHERE
+	manager_id IS NULL
+UNION ALL
+	SELECT
+		e.employee_id,
+		(
+			rl.subordinates || ' > ' || e.full_name
+		) AS subordinates
+	FROM
+		employees e
+	INNER JOIN reporting_line rl ON e.manager_id = rl.employee_id;
+
 -- Aliases are supported
 CREATE VIEW aliased_opt_prop_view(alias_1, alias_2) AS SELECT * FROM view_table_6;
 
@@ -172,17 +219,28 @@ CREATE VIEW sep_opt_prop_view
 
 SELECT * FROM (SELECT pg_identify_object_as_address(classid, objid, objsubid) as obj_identifier from pg_catalog.pg_dist_object) as obj_identifiers where obj_identifier::text like '%opt_prop_view%' ORDER BY 1;
 
--- Check definitions of views are correct on workers
+-- Check definitions and reltoptions of views are correct on workers
 \c - - - :worker_1_port
-SET search_path to view_prop_schema;
-\d+ aliased_opt_prop_view
-\d+ opt_prop_view
-\d+ sep_opt_prop_view
 
--- Drop views and check metadata afterwards
+SELECT definition FROM pg_views WHERE viewname = 'aliased_opt_prop_view';
+SELECT definition FROM pg_views WHERE viewname = 'opt_prop_view';
+SELECT definition FROM pg_views WHERE viewname = 'sep_opt_prop_view';
+
+SELECT relname, reloptions
+FROM pg_class
+WHERE
+    oid = 'view_prop_schema.aliased_opt_prop_view'::regclass::oid OR
+    oid = 'view_prop_schema.opt_prop_view'::regclass::oid OR
+    oid = 'view_prop_schema.sep_opt_prop_view'::regclass::oid
+ORDER BY 1;
+
 \c - - - :master_port
 SET search_path to view_prop_schema;
 
+-- Sync metadata to check it works properly after adding a view
+SELECT start_metadata_sync_to_node('localhost', :worker_1_port);
+
+-- Drop views and check metadata afterwards
 DROP VIEW prop_view_9 CASCADE;
 DROP VIEW opt_prop_view, aliased_opt_prop_view, view_prop_schema_inner.inner_view_prop, sep_opt_prop_view;
 
@@ -210,5 +268,6 @@ CREATE VIEW view_for_unsup_commands AS SELECT * FROM table_to_test_unsup_view;
 CREATE OR REPLACE VIEW view_for_unsup_commands(a,b) AS SELECT * FROM table_to_test_unsup_view;
 CREATE OR REPLACE VIEW view_for_unsup_commands AS SELECT id FROM table_to_test_unsup_view;
 
+SET client_min_messages TO ERROR;
 DROP SCHEMA view_prop_schema_inner CASCADE;
 DROP SCHEMA view_prop_schema CASCADE;

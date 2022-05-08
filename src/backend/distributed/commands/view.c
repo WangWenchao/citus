@@ -121,7 +121,7 @@ PostprocessViewStmt(Node *node, const char *queryString)
 		 */
 		if (InTableTypeConversionFunctionCall)
 		{
-			RaiseDeferredError(errMsg, NOTICE);
+			RaiseDeferredError(errMsg, DEBUG1);
 			return NIL;
 		}
 
@@ -146,6 +146,34 @@ PostprocessViewStmt(Node *node, const char *queryString)
 
 	char *command = CreateViewDDLCommand(viewAddress.objectId);
 
+	/*
+	 * We'd typically use NodeDDLTaskList() for generating node-level DDL commands,
+	 * such as when creating a type. However, views are different in a sense that
+	 * views do not depend on citus tables. Instead, they are `depending` on citus tables.
+	 *
+	 * When NodeDDLTaskList() used, it should be accompanied with sequential execution.
+	 * Here, we do something equivalent to NodeDDLTaskList(), but using metadataSyncCommand
+	 * field. This hack allows us to use the metadata connection
+	 * (see `REQUIRE_METADATA_CONNECTION` flag). Meaning that, view creation is treated as
+	 * a metadata operation.
+	 *
+	 * We do this mostly for performance reasons, because we cannot	afford to switch to
+	 * sequential execution, for instance when we are altering or creating distributed
+	 * tables -- which may require significant resources.
+	 *
+	 * The downside of using this hack is that if a view is re-used in the same transaction
+	 * that creates the view on the workers, we might get errors such as the below which
+	 * we consider a decent trade-off currently:
+	 *
+	 * BEGIN;
+	 *      CREATE VIEW dist_view ..
+	 *      CRETAE TABLE t2(id int, val dist_view);
+	 *
+	 *      -- shard creation fails on one of the connections
+	 *      SELECT create_distributed_table('t2', 'id');
+	 * ERROR: type "public.dist_view" does not exist
+	 *
+	 */
 	DDLJob *ddlJob = palloc0(sizeof(DDLJob));
 	ddlJob->targetObjectAddress = viewAddress;
 	ddlJob->metadataSyncCommand = command;
@@ -193,16 +221,10 @@ PreprocessDropViewStmt(Node *node, const char *queryString, ProcessUtilityContex
 		return NIL;
 	}
 
-	/*
-	 * Our statements need to be fully qualified so we can drop them from the right schema
-	 * on the workers
-	 */
-	QualifyTreeNode((Node *) stmt);
+	List *distributedViewNames = FilterNameListForDistributedViews(stmt->objects,
+																   stmt->missing_ok);
 
-	List *distributedViews = FilterNameListForDistributedViews(stmt->objects,
-															   stmt->missing_ok);
-
-	if (list_length(distributedViews) < 1)
+	if (list_length(distributedViewNames) < 1)
 	{
 		/* no distributed view to drop */
 		return NIL;
@@ -216,7 +238,9 @@ PreprocessDropViewStmt(Node *node, const char *queryString, ProcessUtilityContex
 	 * ensures we only have distributed views in the deparsed drop statement.
 	 */
 	DropStmt *stmtCopy = copyObject(stmt);
-	stmtCopy->objects = distributedViews;
+	stmtCopy->objects = distributedViewNames;
+
+	QualifyTreeNode((Node *) stmtCopy);
 	const char *dropStmtSql = DeparseTreeNode((Node *) stmtCopy);
 
 	List *commands = list_make3(DISABLE_DDL_PROPAGATION,
@@ -229,7 +253,7 @@ PreprocessDropViewStmt(Node *node, const char *queryString, ProcessUtilityContex
 
 /*
  * FilterNameListForDistributedViews takes a list of view names and filters against the
- * views that are distributed. Given list of view names must be qualified before.
+ * views that are distributed.
  *
  * The original list will not be touched, a new list will be created with only the objects
  * in there.
@@ -239,11 +263,20 @@ FilterNameListForDistributedViews(List *viewNamesList, bool missing_ok)
 {
 	List *distributedViewNames = NIL;
 
-	List *qualifiedViewName = NULL;
-	foreach_ptr(qualifiedViewName, viewNamesList)
+	List *possiblyQualifiedViewName = NULL;
+	foreach_ptr(possiblyQualifiedViewName, viewNamesList)
 	{
-		char *schemaName = strVal(linitial(qualifiedViewName));
-		char *viewName = strVal(lsecond(qualifiedViewName));
+		char *viewName = NULL;
+		char *schemaName = NULL;
+		DeconstructQualifiedName(possiblyQualifiedViewName, &schemaName, &viewName);
+
+		if (schemaName == NULL)
+		{
+			char *objName = NULL;
+			Oid schemaOid = QualifiedNameGetCreationNamespace(possiblyQualifiedViewName,
+															  &objName);
+			schemaName = get_namespace_name(schemaOid);
+		}
 
 		Oid schemaId = get_namespace_oid(schemaName, missing_ok);
 		Oid viewOid = get_relname_relid(viewName, schemaId);
@@ -258,9 +291,11 @@ FilterNameListForDistributedViews(List *viewNamesList, bool missing_ok)
 
 		if (IsObjectDistributed(&viewAddress))
 		{
-			distributedViewNames = lappend(distributedViewNames, qualifiedViewName);
+			distributedViewNames = lappend(distributedViewNames,
+										   possiblyQualifiedViewName);
 		}
 	}
+
 	return distributedViewNames;
 }
 

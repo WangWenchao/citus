@@ -821,7 +821,7 @@ DeferErrorIfHasUnsupportedDependency(const ObjectAddress *objectAddress)
 		if (IsObjectDistributed(objectAddress))
 		{
 			appendStringInfo(hintInfo,
-							 "Distribute \"%s\" first to update \"%s\" on worker nodes",
+							 "Distribute \"%s\" first to modify \"%s\" on worker nodes",
 							 dependencyDescription,
 							 objectDescription);
 		}
@@ -1330,9 +1330,13 @@ ExpandCitusSupportedTypes(ObjectAddressCollector *collector, ObjectAddress targe
 			/*
 			 * Get the dependencies of the rule for the given view. PG keeps internal
 			 * dependency between view and rule. As it is stated on the PG doc, if
-			 * there is an internal dependency, NORMAL and AUTO dependencies of the
-			 * dependent object behave much like they were dependencies of the referenced
-			 * object.
+			 * there is an internal dependency, dependencies of the dependent object
+			 * behave much like they were dependencies of the referenced object.
+			 *
+			 * We need to expand dependencies by including dependencies of the rule
+			 * internally dependent to the view. PG doesn't keep any dependencies
+			 * from view to any object, but it keeps an internal dependency to the
+			 * rule and that rule has dependencies to other objects.
 			 */
 			char relKind = get_rel_relkind(relationId);
 			if (relKind == RELKIND_VIEW)
@@ -1357,10 +1361,10 @@ ExpandCitusSupportedTypes(ObjectAddressCollector *collector, ObjectAddress targe
  * internal rule dependencies.
  */
 static List *
-GetViewRuleReferenceDependencyList(Oid relationId)
+GetViewRuleReferenceDependencyList(Oid viewId)
 {
 	List *dependencyTupleList = GetPgDependTuplesForDependingObjects(RelationRelationId,
-																	 relationId);
+																	 viewId);
 	List *nonInternalDependenciesOfDependingRules = NIL;
 
 	HeapTuple depTup = NULL;
@@ -1370,7 +1374,12 @@ GetViewRuleReferenceDependencyList(Oid relationId)
 
 		/*
 		 * Dependencies of the internal rule dependency should be handled as the dependency
-		 * of referenced object.
+		 * of referenced view object.
+		 *
+		 * PG doesn't keep dependency relation between views and dependent objects directly
+		 * but it keeps an internal dependency relation between the view and the rule, then
+		 * keeps the dependent objects of the view as non-internal dependencies of the
+		 * internally dependent rule object.
 		 */
 		if (pg_depend->deptype == DEPENDENCY_INTERNAL && pg_depend->classid ==
 			RewriteRelationId)
@@ -1384,10 +1393,13 @@ GetViewRuleReferenceDependencyList(Oid relationId)
 			DependencyDefinition *dependencyDef = NULL;
 			foreach_ptr(dependencyDef, ruleDependencies)
 			{
-				/* Do not add internal dependencies and relation itself */
+				/*
+				 * Follow all dependencies of the internally dependent rule dependencies
+				 * except it is an internal dependency of view itself.
+				 */
 				if (dependencyDef->data.pg_depend.deptype == DEPENDENCY_INTERNAL ||
 					(dependencyDef->data.pg_depend.refclassid == RelationRelationId &&
-					 dependencyDef->data.pg_depend.refobjid == relationId))
+					 dependencyDef->data.pg_depend.refobjid == viewId))
 				{
 					continue;
 				}
